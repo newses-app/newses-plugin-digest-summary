@@ -53,6 +53,9 @@ export default definePlugin({
       'settings.feedChoice.option.except': 'All but the feeds below',
       'settings.feeds': 'Feeds',
       'settings.feeds.hint': 'Used when only some feeds are read, or all but some.',
+      'action.estimate': 'Estimate cost',
+      'action.estimate.hint':
+        'What the overview of a test digest of your unread articles from the last day would cost now, without sending it.',
     },
   },
   hooks: {
@@ -75,18 +78,6 @@ export default definePlugin({
         return { overview };
       },
     },
-    // What digest.compose would cost for a test digest now, for "Estimate cost"; makes no request.
-    'digest.estimate': {
-      run: (input, context) =>
-        estimate({
-          settings: context.settings,
-          userSettings: context.userSettings ?? userSettings.parse({}),
-          input,
-          storage: context.storage,
-          userStorage: context.userStorage,
-          now: () => new Date(),
-        }),
-    },
     test: {
       async run(context) {
         const client = clientFor(context.settings, context.fetch);
@@ -103,6 +94,25 @@ export default definePlugin({
           message: `The API key works with ${context.settings.model}. Tokens this month: yours ${formatted(mine)} of ${formatted(context.settings.userMonthlyTokens)}, the server's ${formatted(server)} of ${formatted(context.settings.monthlyTokens)}.`,
         };
       },
+    },
+  },
+  actions: {
+    // What digest.compose would cost for a test digest now, making no request.
+    estimate: {
+      digest: true,
+      run: async (context, digest) => ({
+        ok: true,
+        message: digest
+          ? await estimate({
+              settings: context.settings,
+              userSettings: context.userSettings ?? userSettings.parse({}),
+              input: digest,
+              storage: context.storage,
+              userStorage: context.userStorage,
+              now: () => new Date(),
+            })
+          : 'No test digest to estimate.',
+      }),
     },
   },
 });

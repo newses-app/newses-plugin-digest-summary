@@ -20,7 +20,7 @@ import {
   readOverview,
   readPart,
 } from './prompts.js';
-import { costOf, type RequestTokens, tokensIn } from './prices.js';
+import { costOf, dollars, type RequestTokens, tokensIn } from './prices.js';
 import type { InstanceSettings, UserSettings } from './settings.js';
 import { count, remaining, tokensOf } from './usage.js';
 
@@ -149,8 +149,8 @@ export function planOf(input: DigestComposeInput, userSettings: UserSettings) {
 }
 
 /**
- * What a digest's overview is expected to cost, making no request: its tokens, in US dollars at
- * list prices, and a note of how it would be read, or why it would add nothing.
+ * What the overview of a digest is expected to cost, making no request, as plain text: how it
+ * would be read, its tokens, and US dollars at list prices, or why it would add nothing.
  */
 export async function estimate(options: {
   settings: InstanceSettings;
@@ -159,36 +159,24 @@ export async function estimate(options: {
   storage: PluginStore;
   userStorage: PluginStore | null;
   now: () => Date;
-}): Promise<{ tokens: number; costUsd: number; note: string }> {
+}): Promise<string> {
   const { settings } = options;
   const plan = planOf(options.input, options.userSettings);
   if (!plan)
-    return {
-      tokens: 0,
-      costUsd: 0,
-      note: 'None of these articles are from feeds it reads, so it adds nothing.',
-    };
+    return "None of the test digest's articles are from feeds it reads, so it would add nothing.";
   const tokens = tokensIn(plan.planned);
-  const costUsd = costOf(settings.model, plan.planned);
   const left = await remaining(
     { instance: settings.monthlyTokens, user: settings.userMonthlyTokens },
     { instance: options.storage, user: options.userStorage },
     options.now(),
   );
   const formatted = (n: number) => new Intl.NumberFormat('en').format(n);
-  const articles = `${formatted(plan.entries.length)} ${plan.entries.length === 1 ? 'article' : 'articles'}`;
+  const count = plan.entries.length;
+  const articles = `${formatted(count)} ${count === 1 ? 'article' : 'articles'}`;
   const requests = `${String(plan.planned.length)} ${plan.planned.length === 1 ? 'request' : 'requests'}`;
   if (left < tokens)
-    return {
-      tokens: 0,
-      costUsd: 0,
-      note: `It would read ${articles}, about ${formatted(tokens)} tokens, more than the ${formatted(left)} left of this month's budget, so it would add nothing.`,
-    };
-  return {
-    tokens,
-    costUsd,
-    note: `Reads ${articles} in ${requests} to ${settings.model} at ${settings.effort} effort; the output is estimated.`,
-  };
+    return `A test digest now: ${articles}, about ${formatted(tokens)} tokens, more than the ${formatted(left)} left of this month's budget, so it would add nothing.`;
+  return `A test digest now: ${articles} in ${requests} to ${settings.model} at ${settings.effort} effort, about ${formatted(tokens)} tokens, ${dollars(costOf(settings.model, plan.planned))}. The output is estimated.`;
 }
 
 /**
@@ -293,16 +281,18 @@ export async function compose(options: {
       return readPart(asked.text) ?? 'invalid';
     }),
   );
-  const failed = found.find((part) => typeof part === 'string');
-  if (failed !== undefined) return { overview: null, outcome: failed };
+  // A part that failed or ran out of time leaves the overview to the parts that answered.
+  const read = parts.filter((_, index) => typeof found[index] !== 'string');
+  if (read.length === 0) return { overview: null, outcome: found[0] as DigestOutcome };
   const asked = await ask(
     MERGE_SYSTEM,
     mergePrompt({
       language,
       frequency,
       given: entries.length,
+      read: read.length < parts.length ? articleCount(read.flat()) : entries.length,
       total,
-      parts: found as PartThemes[],
+      parts: found.filter((part) => typeof part !== 'string'),
     }),
     OVERVIEW_FORMAT,
     options.deadline,
@@ -311,6 +301,10 @@ export async function compose(options: {
   const overview = readOverview(asked.text);
   return overview ? { overview, outcome: 'written' } : { overview: null, outcome: 'invalid' };
 }
+
+/** Articles in the feeds. */
+const articleCount = (feeds: readonly FeedArticles[]) =>
+  feeds.reduce((sum, feed) => sum + feed.articles.length, 0);
 
 /** Tokens the articles take in a request, about. */
 const articlesTokens = (feeds: readonly FeedArticles[]) =>

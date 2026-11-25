@@ -54,3 +54,7 @@ export function costOf(model: InstanceSettings['model'], requests: readonly Requ
 /** Every token of some requests. */
 export const tokensIn = (requests: readonly RequestTokens[]) =>
   requests.reduce((sum, r) => sum + r.input + r.cacheWrite + r.cacheRead + r.output, 0);
+
+/** US dollars for a message: `about $0.95`, or `less than $0.01`. */
+export const dollars = (amount: number) =>
+  amount < 0.005 ? 'less than $0.01' : `about $${amount.toFixed(2)}`;

@@ -41,10 +41,10 @@ Then, in Settings > Plugins:
 
 ## How it works
 
-| Digest size                                   | What happens                                                                                                                                                                                                                   |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Up to about 50,000 tokens (some 400 articles) | One request reads every chosen article, grouped by feed, and writes the overview                                                                                                                                               |
-| Larger                                        | The articles are split into up to 6 parts, feeds kept together where they fit, read at once. Each part gives its themes, with how many articles each covers, and notable stories. A last request writes the overview from them |
+| Digest size                                   | What happens                                                                                                                                                                                                                                                                                      |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Up to about 50,000 tokens (some 400 articles) | One request reads every chosen article, grouped by feed, and writes the overview                                                                                                                                                                                                                  |
+| Larger                                        | The articles are split into up to 6 parts, feeds kept together where they fit, read at once. Each part gives its themes, with how many articles each covers, and notable stories. A last request writes the overview from them, or from the parts that answered when some fail or run out of time |
 
 - **Time limit:** a digest waits at most a minute for its plugins. The parts have about 60% of that, and the last request the rest.
 - **When an answer is missing:** if any request fails, is declined, is cut off, or is not the format asked for, the digest goes out without an overview.

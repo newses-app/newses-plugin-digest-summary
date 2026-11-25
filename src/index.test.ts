@@ -1,9 +1,15 @@
 import { readFileSync } from 'node:fs';
 import type { DigestComposeInput, DigestEntry } from '@newses/plugin-api';
-import { fixtureDigestEntry, MemoryStore, runHook, runTest } from '@newses/plugin-api/testing';
+import {
+  fixtureDigestEntry,
+  MemoryStore,
+  runAction,
+  runHook,
+  runTest,
+} from '@newses/plugin-api/testing';
 import { describe, expect, it, vi } from 'vitest';
 import { clientFor } from './claude.js';
-import { compose, estimateTokens, PART_TOKENS, partsOf } from './digest.js';
+import { compose, estimateTokens, PART_TOKENS, partsOf, planOf } from './digest.js';
 import plugin from './index.js';
 import {
   MERGE_SYSTEM,
@@ -12,7 +18,7 @@ import {
   PART_FORMAT,
   PART_SYSTEM,
 } from './prompts.js';
-import { costOf } from './prices.js';
+import { costOf, dollars, tokensIn } from './prices.js';
 import { instanceSettings, userSettings } from './settings.js';
 import { FakeApi } from './test/fake-api.js';
 import { answered, cutOff, fellBack, refused } from './test/responses.js';
@@ -81,7 +87,8 @@ describe('digest summary plugin', () => {
     };
     expect(plugin.version).toBe(pkg.version);
     expect(plugin.hosts).toEqual(['api.anthropic.com']);
-    expect(Object.keys(plugin.hooks)).toEqual(['digest.compose', 'digest.estimate', 'test']);
+    expect(Object.keys(plugin.hooks)).toEqual(['digest.compose', 'test']);
+    expect(Object.keys(plugin.actions ?? {})).toEqual(['estimate']);
   });
 
   it('defaults to Opus 5.5 at low effort and budgets, and each user to all their feeds', () => {
@@ -350,13 +357,35 @@ Write: an overview of this daily digest. The digest has 300 unread articles.
     }
   });
 
-  it('adds nothing when a part fails, without asking for the overview', async () => {
+  it('writes the overview from the parts that answered when one fails', async () => {
+    const TOKENS = { input: 10, output: 10 };
     const { api, run } = setup();
     const entries = [...many(tech, 1, 150), ...many(weather, 1001, 150)];
-    api.messages.push(answered({ themes: [], notable: [] }, { input: 10, output: 10 }), {
-      status: 529,
-      error: 'overloaded_error',
-    });
+    api.messages.push(
+      answered({ themes: [{ theme: 'Chips', articles: 150 }], notable: [] }, TOKENS),
+      { status: 529, error: 'overloaded_error' },
+      answered({ overview: 'Chips.' }, TOKENS),
+    );
+    const { value, context } = await run(digestOf(entries));
+    expect(value).toEqual({ overview: 'Chips.' });
+    expect(outcomeOf(context.logs)).toBe('written');
+    expect(userTurn(api.messageBodies[2])).toBe(`Language: en
+Write: an overview of this daily digest. The digest has 300 unread articles; these themes are from 150 of them.
+
+<parts>
+<part number="1">
+<theme articles="150">Chips</theme>
+</part>
+</parts>`);
+  });
+
+  it('adds nothing when every part fails, without asking for the overview', async () => {
+    const { api, run } = setup();
+    const entries = [...many(tech, 1, 150), ...many(weather, 1001, 150)];
+    api.messages.push(
+      { status: 529, error: 'overloaded_error' },
+      { status: 529, error: 'overloaded_error' },
+    );
     const { value, context } = await run(digestOf(entries));
     expect(value).toEqual({ overview: null });
     expect(outcomeOf(context.logs)).toBe('failed');
@@ -407,39 +436,37 @@ describe('test', () => {
   });
 });
 
-describe('estimate', () => {
+describe('estimate cost', () => {
   const estimateOf = (
     setup_: ReturnType<typeof setup>,
-    input: DigestComposeInput,
+    digest: DigestComposeInput,
     options: { settings?: Record<string, unknown>; userSettings?: Record<string, unknown> } = {},
   ) =>
-    runHook(plugin, 'digest.estimate', input, {
+    runAction(plugin, 'estimate', {
       settings: { ...SETTINGS, ...options.settings },
       userSettings: options.userSettings ?? {},
       fetch: setup_.api.fetch,
       storage: setup_.storage,
       userStorage: setup_.userStorage,
+      digest,
     });
 
-  it('prices what the overview would read, making no request', async () => {
+  it('prices what the overview of a test digest would read, making no request', async () => {
     const context = setup();
     const entries = [...many(tech, 1, 150), ...many(weather, 1001, 150)];
-    const { value } = await estimateOf(
-      context,
-      digestOf(entries.slice(0, 100), entries.slice(100)),
-    );
+    const digest = digestOf(entries.slice(0, 100), entries.slice(100));
+    const { value } = await estimateOf(context, digest);
     expect(context.api.requests).toEqual([]);
-    expect(value?.tokens).toBeGreaterThan(PART_TOKENS);
-    expect(value?.note).toBe(
-      'Reads 300 articles in 3 requests to claude-opus-5-5 at low effort; the output is estimated.',
-    );
+    expect(value.ok).toBe(true);
     // Opus: $4 per million input, $20 per million output, 3,000 output each.
-    const output = 3 * 3_000;
-    expect(value?.costUsd).toBeCloseTo(((value?.tokens ?? 0) - output) * 4e-6 + output * 20e-6);
-    const haiku = await estimateOf(context, digestOf(entries), {
-      settings: { model: 'claude-haiku-5-5' },
-    });
-    expect(haiku.value?.costUsd).toBeLessThan((value?.costUsd ?? 0) / 20);
+    const planned = planOf(digest, userSettings.parse({}))?.planned ?? [];
+    expect(planned).toHaveLength(3);
+    expect(value.message).toBe(
+      `A test digest now: 300 articles in 3 requests to claude-opus-5-5 at low effort, about ${new Intl.NumberFormat('en').format(tokensIn(planned))} tokens, ${dollars(costOf('claude-opus-5-5', planned))}. The output is estimated.`,
+    );
+    const haiku = await estimateOf(context, digest, { settings: { model: 'claude-haiku-5-5' } });
+    expect(haiku.value.message).toContain('to claude-haiku-5-5 at low effort');
+    expect(haiku.value.message).toMatch(/about \$0\.0\d\./);
   });
 
   it('reads only the chosen feeds, and says when it would add nothing', async () => {
@@ -448,20 +475,20 @@ describe('estimate', () => {
     const only = await estimateOf(context, digest, {
       userSettings: { feedChoice: 'only', feeds: [9] },
     });
-    expect(only.value?.note).toContain('Reads 1 article in 1 request');
+    expect(only.value.message).toContain('A test digest now: 1 article in 1 request');
+    expect(only.value.message).toContain('tokens, about $0.06.');
     const none = await estimateOf(context, digest, {
       userSettings: { feedChoice: 'only', feeds: [77] },
     });
     expect(none.value).toEqual({
-      tokens: 0,
-      costUsd: 0,
-      note: 'None of these articles are from feeds it reads, so it adds nothing.',
+      ok: true,
+      message:
+        "None of the test digest's articles are from feeds it reads, so it would add nothing.",
     });
     await context.userStorage.set(MONTH, 999_990);
     const over = await estimateOf(context, digest);
-    expect(over.value?.costUsd).toBe(0);
-    expect(over.value?.note).toMatch(
-      /^It would read 2 articles, about [\d,]+ tokens, more than the 10 left of this month's budget, so it would add nothing\.$/,
+    expect(over.value.message).toMatch(
+      /^A test digest now: 2 articles, about [\d,]+ tokens, more than the 10 left of this month's budget, so it would add nothing\.$/,
     );
   });
 });
@@ -477,5 +504,6 @@ describe('prices', () => {
     const part = { input: 100_000, cacheWrite: 0, cacheRead: 0, output: 0 };
     expect(costOf('claude-haiku-5-5', [part, part])).toBeCloseTo(0.02);
     expect(costOf('claude-haiku-5-5', [{ ...part, input: 100_001 }])).toBeCloseTo(0.05);
+    expect([dollars(0.953), dollars(0.004)]).toEqual(['about $0.95', 'less than $0.01']);
   });
 });

@@ -107,6 +107,8 @@ export function mergePrompt(request: {
   language: string;
   frequency: 'daily' | 'weekly';
   given: number;
+  /** Articles the parts given cover: fewer than given when some parts did not answer. */
+  read: number;
   total: number;
   parts: readonly PartThemes[];
 }): string {
@@ -118,7 +120,11 @@ export function mergePrompt(request: {
     return `<part number="${String(index + 1)}">\n${[...themes, ...notable].join('\n')}\n</part>`;
   });
   return `Language: ${request.language}
-Write: an overview of this ${request.frequency} digest. ${countLine(request.given, request.total)}
+Write: an overview of this ${request.frequency} digest. ${
+    request.read < request.given
+      ? `The digest has ${String(request.total)} unread articles; these themes are from ${String(request.read)} of them.`
+      : countLine(request.given, request.total)
+  }
 
 <parts>
 ${parts.join('\n')}
