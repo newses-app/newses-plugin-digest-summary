@@ -41,13 +41,13 @@ Then, in Settings > Plugins:
 
 ## How it works
 
-| Digest size                                   | What happens                                                                                                                                                                                                                                                                                      |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Up to about 50,000 tokens (some 400 articles) | One request reads every chosen article, grouped by feed, and writes the overview                                                                                                                                                                                                                  |
-| Larger                                        | The articles are split into up to 6 parts, feeds kept together where they fit, read at once. Each part gives its themes, with how many articles each covers, and notable stories. A last request writes the overview from them, or from the parts that answered when some fail or run out of time |
+| Digest size                                   | What happens                                                                                                                                                                                                                   |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Up to about 50,000 tokens (some 400 articles) | One request reads every chosen article, grouped by feed, and writes the overview                                                                                                                                               |
+| Larger                                        | The articles are split into up to 6 parts, feeds kept together where they fit, read at once. Each part gives its themes, with how many articles each covers, and notable stories. A last request writes the overview from them |
 
-- **Time limit:** a digest waits at most a minute for its plugins. The parts have about 60% of that, and the last request the rest.
-- **When an answer is missing:** if any request fails, is declined, is cut off, or is not the format asked for, the digest goes out without an overview.
+- **Time limit:** a digest waits at most 5 minutes for its plugins. The parts have about 60% of that, and the last request the rest.
+- **When an answer is missing:** if a request fails, runs out of time, is declined, is cut off, or is not the format asked for, the digest goes out without an overview. When only some parts answer, the overview is written from them and ends by saying how many articles it covers and how many parts ran out of time or failed.
 - **Untrusted feed text:** it sits in the user turn, escaped inside tags. The system prompt says to summarise only, and to take no instructions from articles. The answer must be JSON of the overview, or of a part's themes, alone (structured outputs).
 - **Declined requests:** when the model declines a request, the server's default fallback model answers instead (server-side fallback).
 

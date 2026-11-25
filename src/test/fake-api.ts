@@ -20,8 +20,9 @@ export class FakeApi {
   /** The status `GET /v1/models/:id` answers with. */
   modelStatus = 200;
 
-  readonly fetch: typeof globalThis.fetch = async (input) => {
-    const request = input as Request;
+  readonly fetch: typeof globalThis.fetch = async (input, init) => {
+    // The plugin's context gives a Request; the SDK, given this directly, a URL and options.
+    const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
     const text = request.method === 'GET' ? '' : await request.text();
     this.requests.push({

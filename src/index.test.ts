@@ -30,6 +30,7 @@ const MONTH = `usage:${monthOf(new Date())}`;
 const tech = { id: 4, title: 'Tech & Co', url: 'https://tech.example/feed', withLogin: false };
 const weather = { id: 9, title: 'Weather', url: 'https://weather.example/feed', withLogin: false };
 const members = { id: 2, title: 'Members', url: null, withLogin: true };
+const sport = { id: 11, title: 'Sport', url: 'https://sport.example/feed', withLogin: false };
 
 const article = (id: number, feed: DigestEntry['feed'], title = `Story ${String(id)}`) =>
   fixtureDigestEntry({
@@ -242,7 +243,7 @@ Write: an overview of this daily digest. The digest has 5 unread articles; these
       deadline: Date.now() + 50,
       now: () => new Date(),
     });
-    expect(result).toEqual({ overview: null, outcome: 'failed' });
+    expect(result).toEqual({ overview: null, outcome: 'timed out' });
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
@@ -367,8 +368,11 @@ Write: an overview of this daily digest. The digest has 300 unread articles.
       answered({ overview: 'Chips.' }, TOKENS),
     );
     const { value, context } = await run(digestOf(entries));
-    expect(value).toEqual({ overview: 'Chips.' });
-    expect(outcomeOf(context.logs)).toBe('written');
+    expect(value).toEqual({
+      overview:
+        'Chips.\n\nThis overview covers 150 of 300 articles: of the 2 parts they were read in, 1 failed.',
+    });
+    expect(outcomeOf(context.logs)).toBe('partial');
     expect(userTurn(api.messageBodies[2])).toBe(`Language: en
 Write: an overview of this daily digest. The digest has 300 unread articles; these themes are from 150 of them.
 
@@ -377,6 +381,40 @@ Write: an overview of this daily digest. The digest has 300 unread articles; the
 <theme articles="150">Chips</theme>
 </part>
 </parts>`);
+  });
+
+  it('says which parts ran out of time and which failed', async () => {
+    const TOKENS = { input: 10, output: 10 };
+    const { api, storage, userStorage } = setup();
+    const entries = [...many(tech, 1, 150), ...many(weather, 1001, 150), ...many(sport, 2001, 150)];
+    api.messages.push(
+      answered({ themes: [{ theme: 'Chips', articles: 150 }], notable: [] }, TOKENS),
+      'hang',
+      { status: 529, error: 'overloaded_error' },
+      answered({ overview: 'Chips.' }, TOKENS),
+    );
+    const result = await compose({
+      client: clientFor(SETTINGS, api.fetch),
+      settings: instanceSettings.parse(SETTINGS),
+      userSettings: userSettings.parse({}),
+      input: digestOf(entries),
+      storage,
+      userStorage,
+      logger: {
+        debug: () => undefined,
+        info: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+      },
+      signal: new AbortController().signal,
+      deadline: Date.now() + 500,
+      now: () => new Date(),
+    });
+    expect(result).toEqual({
+      overview:
+        'Chips.\n\nThis overview covers 150 of 450 articles: of the 3 parts they were read in, 1 ran out of time and 1 failed.',
+      outcome: 'partial',
+    });
   });
 
   it('adds nothing when every part fails, without asking for the overview', async () => {

@@ -1,9 +1,10 @@
-import type Anthropic from '@anthropic-ai/sdk';
-import type {
-  DigestComposeInput,
-  DigestEntry,
-  PluginLogger,
-  PluginStore,
+import Anthropic from '@anthropic-ai/sdk';
+import {
+  DIGEST_LIMITS,
+  type DigestComposeInput,
+  type DigestEntry,
+  type PluginLogger,
+  type PluginStore,
 } from '@newses/plugin-api';
 import { FALLBACK_BETA, finalText } from './claude.js';
 import {
@@ -56,7 +57,16 @@ export function plannedRequests(
 }
 
 /** What a digest's overview ended as, for the log. */
-export type DigestOutcome = 'written' | 'refused' | 'invalid' | 'over budget' | 'failed' | 'none';
+export type DigestOutcome =
+  | 'written'
+  /** Written from the parts that answered, saying how many did not. */
+  | 'partial'
+  | 'refused'
+  | 'invalid'
+  | 'over budget'
+  | 'failed'
+  | 'timed out'
+  | 'none';
 
 /** Whether an entry may go to the API: never one of a feed with a login, or a published page. */
 export const sendable = (entry: DigestEntry) => entry.feed !== null && !entry.feed.withLogin;
@@ -128,7 +138,9 @@ export function partsOf(feeds: readonly FeedArticles[], limit: number): FeedArti
 }
 
 /** How one request ended: its text, or why it has none. */
-type Asked = { ok: true; text: string } | { ok: false; outcome: 'refused' | 'invalid' | 'failed' };
+type Asked =
+  | { ok: true; text: string }
+  | { ok: false; outcome: 'refused' | 'invalid' | 'failed' | 'timed out' };
 
 /**
  * How a digest's overview would be read: the user's chosen entries of those listed and unlisted,
@@ -227,6 +239,7 @@ export async function compose(options: {
     let response: Anthropic.Beta.BetaMessage;
     // Whole milliseconds: AbortSignal.timeout refuses fractions.
     const left = Math.max(1, Math.floor(by - Date.now()));
+    const ownTime = AbortSignal.timeout(left);
     try {
       response = await client.beta.messages.create(
         {
@@ -239,14 +252,20 @@ export async function compose(options: {
           messages: [{ role: 'user', content: prompt }],
         },
         {
-          signal: AbortSignal.any([signal, AbortSignal.timeout(left)]),
+          signal: AbortSignal.any([signal, ownTime]),
           timeout: left,
           maxRetries: 0,
         },
       );
     } catch (error) {
-      logger.warn('digest request failed', { error: String(error) });
-      return { ok: false, outcome: 'failed' };
+      // Out of its own time, rather than the digest's (which ends the digest too).
+      const timedOut =
+        !signal.aborted &&
+        (ownTime.aborted || error instanceof Anthropic.APIConnectionTimeoutError);
+      logger.warn(timedOut ? 'digest request ran out of time' : 'digest request failed', {
+        error: String(error),
+      });
+      return { ok: false, outcome: timedOut ? 'timed out' : 'failed' };
     }
     await counted(tokensOf(response.usage));
     if (response.stop_reason === 'refusal') return { ok: false, outcome: 'refused' };
@@ -299,8 +318,39 @@ export async function compose(options: {
   );
   if (!asked.ok) return { overview: null, outcome: asked.outcome };
   const overview = readOverview(asked.text);
-  return overview ? { overview, outcome: 'written' } : { overview: null, outcome: 'invalid' };
+  if (!overview) return { overview: null, outcome: 'invalid' };
+  if (read.length === parts.length) return { overview, outcome: 'written' };
+  const missed = found.filter((part) => typeof part === 'string');
+  const note = missingNote({
+    read: articleCount(read.flat()),
+    given: entries.length,
+    parts: parts.length,
+    timedOut: missed.filter((outcome) => outcome === 'timed out').length,
+    failed: missed.filter((outcome) => outcome !== 'timed out').length,
+  });
+  return { overview: withNote(overview, note), outcome: 'partial' };
 }
+
+/** What an overview written from only some parts says of the rest. */
+export function missingNote(counts: {
+  read: number;
+  given: number;
+  parts: number;
+  timedOut: number;
+  failed: number;
+}): string {
+  const n = (count: number) => new Intl.NumberFormat('en').format(count);
+  const { timedOut, failed } = counts;
+  const why = [
+    timedOut > 0 && `${n(timedOut)} ran out of time`,
+    failed > 0 && `${n(failed)} failed`,
+  ].filter(Boolean);
+  return `This overview covers ${n(counts.read)} of ${n(counts.given)} articles: of the ${n(counts.parts)} parts they were read in, ${why.join(' and ')}.`;
+}
+
+/** The overview with a last paragraph, within the digest's limit. */
+const withNote = (overview: string, note: string) =>
+  `${overview.slice(0, DIGEST_LIMITS.overview - note.length - 2).trimEnd()}\n\n${note}`;
 
 /** Articles in the feeds. */
 const articleCount = (feeds: readonly FeedArticles[]) =>
