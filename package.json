@@ -1,6 +1,6 @@
 {
   "name": "@newses/plugin-digest-summary",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A Newses plugin that opens your email digest with an overview of the common themes of your unread articles, written by Claude",
   "license": "AGPL-3.0-or-later",
   "repository": {

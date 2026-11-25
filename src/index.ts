@@ -17,7 +17,7 @@ const formatted = (tokens: number) => new Intl.NumberFormat('en').format(tokens)
 export default definePlugin({
   id: 'digest-summary',
   // Keep in step with package.json; a test checks they match.
-  version: '0.1.0',
+  version: '0.1.1',
   apiVersion: '^0.1.1',
   scopes: ['user'],
   hosts: [API_HOST],
