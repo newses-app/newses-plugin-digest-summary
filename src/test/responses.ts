@@ -84,19 +84,3 @@ export const cutOff = {
   stop_details: null,
   usage: usage(900, 8000),
 };
-
-/** A batch result line: a succeeded message, or an errored or expired item. */
-export const batchLine = {
-  succeeded: (customId: string, message: unknown) => ({
-    custom_id: customId,
-    result: { type: 'succeeded', message },
-  }),
-  errored: (customId: string) => ({
-    custom_id: customId,
-    result: {
-      type: 'errored',
-      error: { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
-    },
-  }),
-  expired: (customId: string) => ({ custom_id: customId, result: { type: 'expired' } }),
-};

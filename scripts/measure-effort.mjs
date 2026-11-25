@@ -1,12 +1,15 @@
-// Runs digest requests against the Anthropic API at each effort, to choose the `effort` setting:
+// Writes digest overviews with the Anthropic API at each effort, to choose the `effort` setting:
 // the tokens each used, how long it took, and what it wrote. Every run is billed to the key.
 //
 //   npm run build && ANTHROPIC_API_KEY=sk-ant-... node scripts/measure-effort.mjs [DIGEST.json ...]
-//     [--efforts low,medium,high] [--model claude-opus-5-5]
+//     [--efforts low,medium,high] [--model claude-opus-5-5] [--copies N]
 //
 // A digest file is what `digest.compose` is given (see scripts/sample-digest.json, the default).
+// `--copies N` adds N copies of its articles as unlisted ones, to measure a digest large enough
+// to be read in parts. Each run has the minute a digest gives a plugin, less the plugin's margin.
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
+import { DIGEST_LIMITS } from '@newses/plugin-api';
 import { MemoryStore } from '@newses/plugin-api/testing';
 import { clientFor } from '../dist/claude.js';
 import { compose } from '../dist/digest.js';
@@ -18,6 +21,7 @@ const { values, positionals } = parseArgs({
   options: {
     efforts: { type: 'string', default: EFFORTS.join(',') },
     model: { type: 'string', default: MODELS[0] },
+    copies: { type: 'string', default: '0' },
   },
 });
 const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -25,11 +29,26 @@ if (!apiKey) throw new Error('Set ANTHROPIC_API_KEY to a key from the Claude Con
 const files = positionals.length
   ? positionals
   : [new URL('sample-digest.json', import.meta.url).pathname];
+const copies = Number(values.copies);
+
+/** The digest with `copies` more of its articles, unlisted, under new ids. */
+function enlarged(input) {
+  const articles = [...input.entries, ...input.unlisted];
+  const extra = Array.from({ length: copies }, (_, copy) =>
+    articles.map((entry) => ({ ...entry, id: entry.id + (copy + 1) * 100_000 })),
+  ).flat();
+  return { ...input, unlisted: [...input.unlisted, ...extra], more: input.more + extra.length };
+}
 
 for (const file of files) {
-  const input = JSON.parse(readFileSync(file, 'utf8'));
+  const input = enlarged(JSON.parse(readFileSync(file, 'utf8')));
   for (const effort of values.efforts.split(',')) {
-    const settings = instanceSettings.parse({ apiKey, model: values.model, effort });
+    const settings = instanceSettings.parse({
+      apiKey,
+      model: values.model,
+      effort,
+      userMonthlyTokens: 1_000_000_000,
+    });
     const storage = new MemoryStore();
     const started = Date.now();
     const result = await compose({
@@ -41,14 +60,14 @@ for (const file of files) {
       userStorage: null,
       logger: console,
       signal: new AbortController().signal,
-      deadline: started + 120_000,
+      deadline: started + DIGEST_LIMITS.timeoutSeconds * 1000 - 3_000,
       now: () => new Date(),
     });
     const seconds = ((Date.now() - started) / 1000).toFixed(1);
     const tokens = await usedThisMonth(storage, new Date());
-    console.log(`\n## ${file}: ${settings.model}, effort ${effort}`);
-    console.log(`${result.outcome}, ${tokens} tokens, ${seconds} s`);
+    const articles = input.entries.length + input.unlisted.length;
+    console.log(`\n## ${file}: ${String(articles)} articles, ${settings.model}, effort ${effort}`);
+    console.log(`${result.outcome}, ${String(tokens)} tokens, ${seconds} s`);
     console.log(`\n${result.overview ?? '(no overview)'}\n`);
-    for (const entry of result.entries ?? []) console.log(`- ${entry.id}: ${entry.text}`);
   }
 }

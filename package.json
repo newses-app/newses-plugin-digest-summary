@@ -1,7 +1,7 @@
 {
   "name": "@newses/plugin-digest-summary",
   "version": "0.1.0",
-  "description": "A Newses plugin that opens your email digest with an overview and a one-line summary per article, written by Claude",
+  "description": "A Newses plugin that opens your email digest with an overview of the common themes of your unread articles, written by Claude",
   "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
@@ -38,12 +38,12 @@
     "prepack": "npm run build"
   },
   "peerDependencies": {
-    "@newses/plugin-api": "^0.1.0",
+    "@newses/plugin-api": "^0.1.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@newses/plugin-api": "^0.1.0",
+    "@newses/plugin-api": "file:../newses/plugin-api/dist",
     "@types/node": "^24.19.1",
     "eslint": "^10.12.0",
     "eslint-config-prettier": "^10.1.8",
