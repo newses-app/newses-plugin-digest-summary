@@ -1,6 +1,6 @@
 import { definePlugin, DIGEST_LIMITS } from '@newses/plugin-api';
 import { API_HOST, clientFor, failureText } from './claude.js';
-import { compose } from './digest.js';
+import { compose, estimate } from './digest.js';
 import { instanceSettings, userSettings } from './settings.js';
 import { usedThisMonth } from './usage.js';
 
@@ -74,6 +74,18 @@ export default definePlugin({
         context.logger.info('digest composed', { outcome });
         return { overview };
       },
+    },
+    // What digest.compose would cost, for a test digest's preview; makes no request.
+    'digest.estimate': {
+      run: (input, context) =>
+        estimate({
+          settings: context.settings,
+          userSettings: context.userSettings ?? userSettings.parse({}),
+          input,
+          storage: context.storage,
+          userStorage: context.userStorage,
+          now: () => new Date(),
+        }),
     },
     test: {
       async run(context) {

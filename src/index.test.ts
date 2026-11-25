@@ -12,6 +12,7 @@ import {
   PART_FORMAT,
   PART_SYSTEM,
 } from './prompts.js';
+import { costOf } from './prices.js';
 import { instanceSettings, userSettings } from './settings.js';
 import { FakeApi } from './test/fake-api.js';
 import { answered, cutOff, fellBack, refused } from './test/responses.js';
@@ -80,7 +81,7 @@ describe('digest summary plugin', () => {
     };
     expect(plugin.version).toBe(pkg.version);
     expect(plugin.hosts).toEqual(['api.anthropic.com']);
-    expect(Object.keys(plugin.hooks)).toEqual(['digest.compose', 'test']);
+    expect(Object.keys(plugin.hooks)).toEqual(['digest.compose', 'digest.estimate', 'test']);
   });
 
   it('defaults to Opus 5.5 at low effort and budgets, and each user to all their feeds', () => {
@@ -251,18 +252,18 @@ Write: an overview of this daily digest. The digest has 5 unread articles; these
   });
 });
 
-describe('large digests', () => {
-  /** A feed's articles with long excerpts, so many of them take more than one request. */
-  const many = (feed: DigestEntry['feed'], from: number, count: number) =>
-    Array.from({ length: count }, (_, i) =>
-      fixtureDigestEntry({
-        id: from + i,
-        title: `Report ${String(from + i)}`,
-        feed,
-        excerpt: 'x'.repeat(600),
-      }),
-    );
+/** A feed's articles with long excerpts, so many of them take more than one request. */
+const many = (feed: DigestEntry['feed'], from: number, count: number) =>
+  Array.from({ length: count }, (_, i) =>
+    fixtureDigestEntry({
+      id: from + i,
+      title: `Report ${String(from + i)}`,
+      feed,
+      excerpt: 'x'.repeat(600),
+    }),
+  );
 
+describe('large digests', () => {
   it('packs feeds into parts, splitting only a feed larger than a part', () => {
     const feeds = [
       {
@@ -403,5 +404,78 @@ describe('test', () => {
       ok: false,
       message: 'The API key was refused (HTTP 401): check it in the server’s settings',
     });
+  });
+});
+
+describe('estimate', () => {
+  const estimateOf = (
+    setup_: ReturnType<typeof setup>,
+    input: DigestComposeInput,
+    options: { settings?: Record<string, unknown>; userSettings?: Record<string, unknown> } = {},
+  ) =>
+    runHook(plugin, 'digest.estimate', input, {
+      settings: { ...SETTINGS, ...options.settings },
+      userSettings: options.userSettings ?? {},
+      fetch: setup_.api.fetch,
+      storage: setup_.storage,
+      userStorage: setup_.userStorage,
+    });
+
+  it('prices what the overview would read, making no request', async () => {
+    const context = setup();
+    const entries = [...many(tech, 1, 150), ...many(weather, 1001, 150)];
+    const { value } = await estimateOf(
+      context,
+      digestOf(entries.slice(0, 100), entries.slice(100)),
+    );
+    expect(context.api.requests).toEqual([]);
+    expect(value?.tokens).toBeGreaterThan(PART_TOKENS);
+    expect(value?.note).toBe(
+      'Reads 300 articles in 3 requests to claude-opus-5-5 at low effort; the output is estimated.',
+    );
+    // Opus: $4 per million input, $20 per million output, 3,000 output each.
+    const output = 3 * 3_000;
+    expect(value?.costUsd).toBeCloseTo(((value?.tokens ?? 0) - output) * 4e-6 + output * 20e-6);
+    const haiku = await estimateOf(context, digestOf(entries), {
+      settings: { model: 'claude-haiku-5-5' },
+    });
+    expect(haiku.value?.costUsd).toBeLessThan((value?.costUsd ?? 0) / 20);
+  });
+
+  it('reads only the chosen feeds, and says when it would add nothing', async () => {
+    const context = setup();
+    const digest = digestOf([article(1, tech), article(2, weather), article(3, members)]);
+    const only = await estimateOf(context, digest, {
+      userSettings: { feedChoice: 'only', feeds: [9] },
+    });
+    expect(only.value?.note).toContain('Reads 1 article in 1 request');
+    const none = await estimateOf(context, digest, {
+      userSettings: { feedChoice: 'only', feeds: [77] },
+    });
+    expect(none.value).toEqual({
+      tokens: 0,
+      costUsd: 0,
+      note: 'None of these articles are from feeds it reads, so it adds nothing.',
+    });
+    await context.userStorage.set(MONTH, 999_990);
+    const over = await estimateOf(context, digest);
+    expect(over.value?.costUsd).toBe(0);
+    expect(over.value?.note).toMatch(
+      /^It would read 2 articles, about [\d,]+ tokens, more than the 10 left of this month's budget, so it would add nothing\.$/,
+    );
+  });
+});
+
+describe('prices', () => {
+  it('prices input, cache writes and reads, and output', () => {
+    const million = { input: 1_000_000, cacheWrite: 0, cacheRead: 0, output: 0 };
+    expect(costOf('claude-opus-5-5', [million])).toBe(4);
+    expect(costOf('claude-opus-5-5', [{ ...million, input: 0, cacheWrite: 1_000_000 }])).toBe(5);
+    expect(costOf('claude-sonnet-5-5', [{ ...million, input: 0, cacheRead: 1_000_000 }])).toBe(0.1);
+    expect(costOf('claude-sonnet-5-5', [{ ...million, input: 0, output: 1_000_000 }])).toBe(10);
+    // Haiku's prompt price by each request's prompt.
+    const part = { input: 100_000, cacheWrite: 0, cacheRead: 0, output: 0 };
+    expect(costOf('claude-haiku-5-5', [part, part])).toBeCloseTo(0.02);
+    expect(costOf('claude-haiku-5-5', [{ ...part, input: 100_001 }])).toBeCloseTo(0.05);
   });
 });

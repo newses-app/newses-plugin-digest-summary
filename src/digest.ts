@@ -20,6 +20,7 @@ import {
   readOverview,
   readPart,
 } from './prompts.js';
+import { costOf, type RequestTokens, tokensIn } from './prices.js';
 import type { InstanceSettings, UserSettings } from './settings.js';
 import { count, remaining, tokensOf } from './usage.js';
 
@@ -33,6 +34,26 @@ const PARTS_SHARE = 0.6;
 const MAX_TOKENS = 16_000;
 /** Output tokens a request is expected to use, thinking included, for the budget check. */
 const OUTPUT_ESTIMATE = 3_000;
+/** Input tokens the parts' themes are expected to take in the request that merges them. */
+const THEMES_ESTIMATE = 400;
+
+/** The requests reading articles of `whole` tokens are expected to take: one, or parts and a merge. */
+export function plannedRequests(
+  partTokens: readonly number[] | null,
+  whole: number,
+): RequestTokens[] {
+  const request = (input: number) => ({
+    input,
+    cacheWrite: 0,
+    cacheRead: 0,
+    output: OUTPUT_ESTIMATE,
+  });
+  if (!partTokens) return [request(whole)];
+  return [
+    ...partTokens.map((tokens) => request(estimateTokens(PART_SYSTEM) + tokens)),
+    request(estimateTokens(MERGE_SYSTEM) + THEMES_ESTIMATE * partTokens.length),
+  ];
+}
 
 /** What a digest's overview ended as, for the log. */
 export type DigestOutcome = 'written' | 'refused' | 'invalid' | 'over budget' | 'failed' | 'none';
@@ -110,6 +131,67 @@ export function partsOf(feeds: readonly FeedArticles[], limit: number): FeedArti
 type Asked = { ok: true; text: string } | { ok: false; outcome: 'refused' | 'invalid' | 'failed' };
 
 /**
+ * How a digest's overview would be read: the user's chosen entries of those listed and unlisted,
+ * by feed, in one request or in parts, and the requests' expected tokens; null with none chosen.
+ */
+export function planOf(input: DigestComposeInput, userSettings: UserSettings) {
+  const entries = chosen([...input.entries, ...input.unlisted], userSettings);
+  if (entries.length === 0) return null;
+  const feeds = byFeed(entries);
+  const total = entries.length + Math.max(0, input.more - input.unlisted.length);
+  const whole = estimateTokens(OVERVIEW_SYSTEM) + articlesTokens(feeds);
+  const parts =
+    whole <= PART_TOKENS
+      ? null
+      : partsOf(feeds, Math.max(PART_TOKENS, Math.ceil(whole / MAX_PARTS)));
+  const planned = plannedRequests(parts?.map(articlesTokens) ?? null, whole);
+  return { entries, feeds, total, parts, planned };
+}
+
+/**
+ * What a digest's overview is expected to cost, making no request: its tokens, in US dollars at
+ * list prices, and a note of how it would be read, or why it would add nothing.
+ */
+export async function estimate(options: {
+  settings: InstanceSettings;
+  userSettings: UserSettings;
+  input: DigestComposeInput;
+  storage: PluginStore;
+  userStorage: PluginStore | null;
+  now: () => Date;
+}): Promise<{ tokens: number; costUsd: number; note: string }> {
+  const { settings } = options;
+  const plan = planOf(options.input, options.userSettings);
+  if (!plan)
+    return {
+      tokens: 0,
+      costUsd: 0,
+      note: 'None of these articles are from feeds it reads, so it adds nothing.',
+    };
+  const tokens = tokensIn(plan.planned);
+  const costUsd = costOf(settings.model, plan.planned);
+  const left = await remaining(
+    { instance: settings.monthlyTokens, user: settings.userMonthlyTokens },
+    { instance: options.storage, user: options.userStorage },
+    options.now(),
+  );
+  const formatted = (n: number) => new Intl.NumberFormat('en').format(n);
+  const articles = `${formatted(plan.entries.length)} ${plan.entries.length === 1 ? 'article' : 'articles'}`;
+  const requests = `${String(plan.planned.length)} ${plan.planned.length === 1 ? 'request' : 'requests'}`;
+  if (left < tokens)
+    return {
+      tokens: 0,
+      costUsd: 0,
+      note: `It would read ${articles}, about ${formatted(tokens)} tokens, more than the ${formatted(left)} left of this month's budget, so it would add nothing.`,
+    };
+  return {
+    tokens,
+    costUsd,
+    note: `Reads ${articles} in ${requests} to ${settings.model} at ${settings.effort} effort; the output is estimated.`,
+  };
+}
+
+/**
  * One digest's overview: the user's chosen entries of those listed and unlisted, read in one
  * request, or in parts whose themes a last request turns into the overview, within the budgets.
  * Whatever a request ends as (refused, unreadable, out of time), the digest goes out without it.
@@ -128,23 +210,13 @@ export async function compose(options: {
   now: () => Date;
 }): Promise<{ overview: string | null; outcome: DigestOutcome }> {
   const { client, settings, input, storage, userStorage, logger, signal } = options;
-  const entries = chosen([...input.entries, ...input.unlisted], options.userSettings);
-  if (entries.length === 0) return { overview: null, outcome: 'none' };
-  const feeds = byFeed(entries);
-  const total = entries.length + Math.max(0, input.more - input.unlisted.length);
-  const whole = estimateTokens(OVERVIEW_SYSTEM) + articlesTokens(feeds);
-  const parts =
-    whole <= PART_TOKENS
-      ? null
-      : partsOf(feeds, Math.max(PART_TOKENS, Math.ceil(whole / MAX_PARTS)));
-
-  const requests = parts ? parts.length + 1 : 1;
-  const estimate =
-    (parts ? whole + estimateTokens(PART_SYSTEM) * parts.length : whole) +
-    OUTPUT_ESTIMATE * requests;
+  const plan = planOf(input, options.userSettings);
+  if (!plan) return { overview: null, outcome: 'none' };
+  const { entries, feeds, total, parts, planned } = plan;
   const budgets = { instance: settings.monthlyTokens, user: settings.userMonthlyTokens };
   if (
-    (await remaining(budgets, { instance: storage, user: userStorage }, options.now())) < estimate
+    (await remaining(budgets, { instance: storage, user: userStorage }, options.now())) <
+    tokensIn(planned)
   )
     return { overview: null, outcome: 'over budget' };
 
