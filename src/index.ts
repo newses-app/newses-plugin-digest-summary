@@ -75,7 +75,7 @@ export default definePlugin({
         return { overview };
       },
     },
-    // What digest.compose would cost, for a test digest's preview; makes no request.
+    // What digest.compose would cost for a test digest now, for "Estimate cost"; makes no request.
     'digest.estimate': {
       run: (input, context) =>
         estimate({

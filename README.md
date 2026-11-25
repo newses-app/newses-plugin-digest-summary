@@ -58,7 +58,7 @@ Every request is billed to the API key at [Anthropic's prices](https://platform.
 - **Size:** an article takes about 100 input tokens, so a digest of 1,000 unread articles reads about 100,000. The overview takes 500 to 3,000 output tokens, depending on effort.
 - **Budget check:** before a digest, the plugin estimates its tokens. When the server's or the user's budget left is smaller than that, it makes no request.
 - **What is counted:** every token, input and output, of every attempt, fallbacks included, against both budgets. "Send test" shows the counts.
-- **Estimate:** a test digest's preview (Settings → Account → Digest, or "Send test" under "For me") shows what the overview would cost, making no request: the tokens it expects, priced at Anthropic's list prices for the three models as of November 2026 (5-minute cache writes at 1.25 times input; Haiku's higher price for prompts over 100,000 tokens), with 3,000 output tokens a request. It counts neither discounts nor answers from a fallback model, and says when the budget left would stop it.
+- **Estimate:** "Estimate cost" under "For me" shows what the overview of a test digest now would cost, making no request: the tokens it expects, priced at Anthropic's list prices for the three models as of November 2026 (5-minute cache writes at 1.25 times input; Haiku's higher price for prompts over 100,000 tokens), with 3,000 output tokens a request. It counts neither discounts nor answers from a fallback model, and says when the budget left would stop it.
 
 To choose the effort, measure it on digests like yours, billed to your key:
 
