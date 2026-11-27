@@ -423,7 +423,7 @@ const many = (feed: DigestEntry['feed'], from: number, count: number) =>
       id: from + i,
       title: `Report ${String(from + i)}`,
       feed,
-      excerpt: 'x'.repeat(600),
+      excerpt: 'x'.repeat(1300),
     }),
   );
 
@@ -481,7 +481,7 @@ describe('large digests', () => {
   it('reads a digest too large for one request in parts, then writes the overview from their themes', async () => {
     const { api, storage, run } = setup();
     const entries = [...many(tech, 1, 150), ...many(weather, 1001, 150)];
-    const whole = entries.length * estimateTokens('x'.repeat(640));
+    const whole = entries.length * estimateTokens('x'.repeat(1340));
     expect(whole).toBeGreaterThan(PART_TOKENS);
     api.messages.push(
       answered(

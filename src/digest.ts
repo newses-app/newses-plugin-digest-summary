@@ -36,7 +36,7 @@ import {
 import { count, remaining, tokensOf } from './usage.js';
 
 /** Input tokens one request reads at most; a larger digest is read in parts. */
-export const PART_TOKENS = 50_000;
+export const PART_TOKENS = 100_000;
 /** Parts read at once, at most; a digest larger than this many parts has larger parts. */
 export const MAX_PARTS = 6;
 /** Of the time left, the share the parts may take, leaving the rest to the merge. */
