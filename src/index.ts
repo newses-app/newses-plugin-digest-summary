@@ -10,15 +10,16 @@ const MARGIN_MS = 3_000;
 const formatted = (tokens: number) => new Intl.NumberFormat('en').format(tokens);
 
 /**
- * Opens each user's email digest with an overview of what their unread articles are about,
- * written by Claude through the Anthropic API from the titles and excerpts of every unread
- * article the digest counts, of the feeds the user chooses.
+ * Opens each user's email digest with an overview of what their unread articles are about, in
+ * topic sections whose points link the articles they draw on, written by Claude through the
+ * Anthropic API from the titles and excerpts of every unread article the digest counts, of the
+ * feeds the user chooses, with the sections, length, style, and instructions the user chooses.
  */
 export default definePlugin({
   id: 'digest-summary',
   // Keep in step with package.json; a test checks they match.
-  version: '0.1.1',
-  apiVersion: '^0.1.1',
+  version: '0.2.0',
+  apiVersion: '^0.1.2',
   scopes: ['user'],
   hosts: [API_HOST],
   settings: { instance: instanceSettings, user: userSettings },
@@ -26,7 +27,7 @@ export default definePlugin({
     en: {
       name: 'Digest summary',
       description:
-        'Opens your email digest with an overview of what your unread articles are about: their common themes, then other notable stories, written by Claude. The title, feed name, and first lines of the unread articles of the feeds you choose go to Anthropic (api.anthropic.com) with the server’s API key, under Anthropic’s commercial terms. Articles from feeds with a login, and pages you published, are never sent.',
+        'Opens your email digest with an overview of what your unread articles are about, written by Claude: a lead on their common themes, then topic sections whose points link the articles they draw on. The title, feed name, and first lines of the unread articles of the feeds you choose go to Anthropic (api.anthropic.com) with the server’s API key, under Anthropic’s commercial terms, with your sections and instructions. Articles from feeds with a login, and pages you published, are never sent, nor are links.',
       'settings.apiKey': 'Anthropic API key',
       'settings.apiKey.hint':
         'From the Claude Console (platform.claude.com), under API keys. Every request is billed to it. Stored as a secret.',
@@ -37,7 +38,7 @@ export default definePlugin({
       'settings.model.option.claude-haiku-5-5': 'Claude Haiku 5.5',
       'settings.effort': 'Effort',
       'settings.effort.hint':
-        'How much the model thinks before it writes; more costs more tokens and takes longer, and a digest waits at most a minute.',
+        'How much the model thinks before it writes; more costs more tokens and takes longer, and a digest waits at most five minutes.',
       'settings.effort.option.low': 'Low',
       'settings.effort.option.medium': 'Medium',
       'settings.effort.option.high': 'High',
@@ -47,12 +48,32 @@ export default definePlugin({
       'settings.userMonthlyTokens': 'Tokens a month, for each user',
       'settings.userMonthlyTokens.hint':
         'A digest of 1,000 unread articles reads about 100,000 tokens.',
+      'settings.allowInstructions': 'Users may add their own instructions',
+      'settings.allowInstructions.hint':
+        'When off, the instructions users wrote under For me are kept but not sent.',
       'settings.feedChoice': 'Feeds to read',
       'settings.feedChoice.option.all': 'All my feeds',
       'settings.feedChoice.option.only': 'Only the feeds below',
       'settings.feedChoice.option.except': 'All but the feeds below',
       'settings.feeds': 'Feeds',
       'settings.feeds.hint': 'Used when only some feeds are read, or all but some.',
+      'settings.sections': 'Sections',
+      'settings.sections.hint':
+        'The topics stories are sorted into, in this order; sections nothing fits are left out. Name a section in any language: its heading is written in your digest’s. With none, the default sections are used.',
+      'settings.sections.item.name': 'Name',
+      'settings.sections.item.about': 'What goes in it',
+      'settings.length': 'Length',
+      'settings.length.hint': 'Longer overviews cost more tokens.',
+      'settings.length.option.brief': 'Brief: up to 2 short points a section',
+      'settings.length.option.standard': 'Standard: up to 3 points a section',
+      'settings.length.option.detailed': 'Detailed: up to 5 longer points a section',
+      'settings.style': 'Points shown as',
+      'settings.style.option.paragraphs': 'Paragraphs',
+      'settings.style.option.bullets': 'Bullets',
+      'settings.lead': 'Open with a lead on the common themes',
+      'settings.instructions': 'Your instructions',
+      'settings.instructions.hint':
+        'What to focus on, leave out, or how to write, such as “Skip celebrity news; explain jargon.” Up to 1,000 characters, sent to Anthropic with your articles. They cannot change what is sent or the overview’s format.',
       'action.estimate': 'Estimate cost',
       'action.estimate.hint':
         'What the overview of a test digest of your unread articles from the last day would cost now, without sending it.',
@@ -62,7 +83,7 @@ export default definePlugin({
     'digest.compose': {
       async run(input, context) {
         const started = Date.now();
-        const { overview, outcome } = await compose({
+        const { overview, sections, outcome } = await compose({
           client: clientFor(context.settings, context.fetch),
           settings: context.settings,
           userSettings: context.userSettings ?? userSettings.parse({}),
@@ -75,7 +96,7 @@ export default definePlugin({
           now: () => new Date(),
         });
         context.logger.info('digest composed', { outcome });
-        return { overview };
+        return { overview, sections };
       },
     },
     test: {
