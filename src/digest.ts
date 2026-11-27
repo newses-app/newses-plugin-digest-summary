@@ -3,6 +3,7 @@ import {
   DIGEST_LIMITS,
   type DigestComposeInput,
   type DigestEntry,
+  type DigestSection,
   type PluginLogger,
   type PluginStore,
 } from '@newses/plugin-api';
@@ -11,18 +12,27 @@ import {
   type FeedArticles,
   MERGE_SYSTEM,
   mergePrompt,
-  OVERVIEW_FORMAT,
+  type OutputFormat,
+  type Overview,
   OVERVIEW_SYSTEM,
   overviewPrompt,
-  PART_FORMAT,
   PART_SYSTEM,
+  partFormat,
   type PartThemes,
   partPrompt,
-  readOverview,
+  preferencesText,
   readPart,
+  readSections,
+  sectionsFormat,
+  sectionsOf,
 } from './prompts.js';
 import { costOf, dollars, type RequestTokens, tokensIn } from './prices.js';
-import type { InstanceSettings, UserSettings } from './settings.js';
+import {
+  DEFAULT_SECTIONS,
+  INSTRUCTIONS_LENGTH,
+  type InstanceSettings,
+  type UserSettings,
+} from './settings.js';
 import { count, remaining, tokensOf } from './usage.js';
 
 /** Input tokens one request reads at most; a larger digest is read in parts. */
@@ -33,25 +43,35 @@ export const MAX_PARTS = 6;
 const PARTS_SHARE = 0.6;
 /** A request's `max_tokens`, thinking included. */
 const MAX_TOKENS = 16_000;
-/** Output tokens a request is expected to use, thinking included, for the budget check. */
-const OUTPUT_ESTIMATE = 3_000;
+/**
+ * Output tokens a request is expected to use, thinking included, for the budget check: a part's,
+ * and the overview's by length.
+ */
+const PART_OUTPUT_ESTIMATE = 3_000;
+export const OUTPUT_ESTIMATE = { brief: 3_000, standard: 5_000, detailed: 8_000 } as const;
 /** Input tokens the parts' themes are expected to take in the request that merges them. */
-const THEMES_ESTIMATE = 400;
+const THEMES_ESTIMATE = 800;
 
-/** The requests reading articles of `whole` tokens are expected to take: one, or parts and a merge. */
+/**
+ * The requests reading articles of `whole` tokens are expected to take: one, or parts and a
+ * merge; `preferences` is the tokens of the reader's preferences each request carries.
+ */
 export function plannedRequests(
   partTokens: readonly number[] | null,
   whole: number,
+  options: { preferences: number; length: UserSettings['length'] },
 ): RequestTokens[] {
-  const request = (input: number) => ({
-    input,
+  const request = (input: number, output = OUTPUT_ESTIMATE[options.length]) => ({
+    input: input + options.preferences,
     cacheWrite: 0,
     cacheRead: 0,
-    output: OUTPUT_ESTIMATE,
+    output,
   });
   if (!partTokens) return [request(whole)];
   return [
-    ...partTokens.map((tokens) => request(estimateTokens(PART_SYSTEM) + tokens)),
+    ...partTokens.map((tokens) =>
+      request(estimateTokens(PART_SYSTEM) + tokens, PART_OUTPUT_ESTIMATE),
+    ),
     request(estimateTokens(MERGE_SYSTEM) + THEMES_ESTIMATE * partTokens.length),
   ];
 }
@@ -83,9 +103,16 @@ export function chosen(entries: readonly DigestEntry[], settings: UserSettings):
   });
 }
 
-/** Entries grouped by feed, feeds in the order their newest entry comes. */
-export function byFeed(entries: readonly DigestEntry[]): FeedArticles[] {
+/**
+ * Entries grouped by feed, feeds in the order their newest entry comes, each entry with a ref
+ * (`a1`, `a2`, … in the order given), and the entry id each ref names.
+ */
+export function byFeed(entries: readonly DigestEntry[]): {
+  feeds: FeedArticles[];
+  ids: Map<string, number>;
+} {
   const feeds = new Map<number, FeedArticles>();
+  const ids = new Map<string, number>();
   for (const entry of entries) {
     if (!entry.feed) continue;
     let feed = feeds.get(entry.feed.id);
@@ -93,16 +120,20 @@ export function byFeed(entries: readonly DigestEntry[]): FeedArticles[] {
       feed = { feed: entry.feed.title, articles: [] };
       feeds.set(entry.feed.id, feed);
     }
-    feed.articles.push({ title: entry.title, excerpt: entry.excerpt });
+    const ref = `a${String(ids.size + 1)}`;
+    ids.set(ref, entry.id);
+    feed.articles.push({ ref, title: entry.title, excerpt: entry.excerpt });
   }
-  return [...feeds.values()];
+  return { feeds: [...feeds.values()], ids };
 }
 
 /** Tokens a text is about, rounded up: some 3 characters each. */
 export const estimateTokens = (text: string) => Math.ceil(text.length / 3);
 
 const articleTokens = (article: FeedArticles['articles'][number]) =>
-  estimateTokens(`<article><title>${article.title}</title><start>${article.excerpt ?? ''}</start>`);
+  estimateTokens(
+    `<article ref="${article.ref}"><title>${article.title}</title><start>${article.excerpt ?? ''}</start>`,
+  );
 
 /**
  * Feeds packed into parts of about `limit` tokens, each feed's articles together where they fit;
@@ -143,21 +174,68 @@ type Asked =
   | { ok: false; outcome: 'refused' | 'invalid' | 'failed' | 'timed out' };
 
 /**
- * How a digest's overview would be read: the user's chosen entries of those listed and unlisted,
- * by feed, in one request or in parts, and the requests' expected tokens; null with none chosen.
+ * The reader's preferences as the requests give them: the sections, and the second system block
+ * of the overview's requests and of the parts'. Their instructions only when the server allows.
  */
-export function planOf(input: DigestComposeInput, userSettings: UserSettings) {
+export function preferencesOf(settings: InstanceSettings, userSettings: UserSettings) {
+  const sections = sectionsOf(userSettings, DEFAULT_SECTIONS);
+  const instructions = settings.allowInstructions
+    ? userSettings.instructions.trim().slice(0, INSTRUCTIONS_LENGTH) || null
+    : null;
+  const options = {
+    sections,
+    length: userSettings.length,
+    lead: userSettings.lead,
+    instructions,
+  };
+  return {
+    sections,
+    names: sections.map((section) => section.name),
+    overview: preferencesText(options),
+    parts: preferencesText({ ...options, forParts: true }),
+  };
+}
+
+/**
+ * How a digest's overview would be read: the user's chosen entries of those listed and unlisted,
+ * by feed with their refs, the reader's preferences, in one request or in parts, and the
+ * requests' expected tokens; null with none chosen.
+ */
+export function planOf(
+  input: DigestComposeInput,
+  settings: InstanceSettings,
+  userSettings: UserSettings,
+) {
   const entries = chosen([...input.entries, ...input.unlisted], userSettings);
   if (entries.length === 0) return null;
-  const feeds = byFeed(entries);
+  const { feeds, ids } = byFeed(entries);
+  const preferences = preferencesOf(settings, userSettings);
   const total = entries.length + Math.max(0, input.more - input.unlisted.length);
   const whole = estimateTokens(OVERVIEW_SYSTEM) + articlesTokens(feeds);
   const parts =
     whole <= PART_TOKENS
       ? null
       : partsOf(feeds, Math.max(PART_TOKENS, Math.ceil(whole / MAX_PARTS)));
-  const planned = plannedRequests(parts?.map(articlesTokens) ?? null, whole);
-  return { entries, feeds, total, parts, planned };
+  const planned = plannedRequests(parts?.map(articlesTokens) ?? null, whole, {
+    preferences: estimateTokens(preferences.overview),
+    length: userSettings.length,
+  });
+  return { entries, feeds, ids, preferences, total, parts, planned };
+}
+
+/** The overview as the digest takes it: the lead as its overview, then its sections. */
+export function additionsOf(
+  overview: Overview,
+  userSettings: Pick<UserSettings, 'lead' | 'style'>,
+): { overview: string | null; sections: DigestSection[] } {
+  return {
+    overview: userSettings.lead && overview.lead ? overview.lead : null,
+    sections: overview.sections.map((section) => ({
+      heading: section.heading,
+      list: userSettings.style === 'bullets',
+      items: section.points.map((point) => ({ text: point.text, entries: point.entries })),
+    })),
+  };
 }
 
 /**
@@ -173,7 +251,7 @@ export async function estimate(options: {
   now: () => Date;
 }): Promise<string> {
   const { settings } = options;
-  const plan = planOf(options.input, options.userSettings);
+  const plan = planOf(options.input, settings, options.userSettings);
   if (!plan)
     return "None of the test digest's articles are from feeds it reads, so it would add nothing.";
   const tokens = tokensIn(plan.planned);
@@ -191,10 +269,20 @@ export async function estimate(options: {
   return `A test digest now: ${articles} in ${requests} to ${settings.model} at ${settings.effort} effort, about ${formatted(tokens)} tokens, ${dollars(costOf(settings.model, plan.planned))}. The output is estimated.`;
 }
 
+/** What a digest's overview ended as, and what it adds to the digest. */
+export interface Composed {
+  overview: string | null;
+  sections: DigestSection[] | null;
+  outcome: DigestOutcome;
+}
+
+const nothing = (outcome: DigestOutcome): Composed => ({ overview: null, sections: null, outcome });
+
 /**
  * One digest's overview: the user's chosen entries of those listed and unlisted, read in one
- * request, or in parts whose themes a last request turns into the overview, within the budgets.
- * Whatever a request ends as (refused, unreadable, out of time), the digest goes out without it.
+ * request, or in parts whose themes a last request turns into the overview, within the budgets,
+ * as a lead and sections whose points cite entries. Whatever a request ends as (refused,
+ * unreadable, out of time), the digest goes out without it.
  */
 export async function compose(options: {
   client: Anthropic;
@@ -208,17 +296,18 @@ export async function compose(options: {
   /** When the overview must be written by, in ms since the epoch. */
   deadline: number;
   now: () => Date;
-}): Promise<{ overview: string | null; outcome: DigestOutcome }> {
-  const { client, settings, input, storage, userStorage, logger, signal } = options;
-  const plan = planOf(input, options.userSettings);
-  if (!plan) return { overview: null, outcome: 'none' };
-  const { entries, feeds, total, parts, planned } = plan;
+}): Promise<Composed> {
+  const { client, settings, userSettings, input, storage, userStorage, logger, signal } = options;
+  const plan = planOf(input, settings, userSettings);
+  if (!plan) return nothing('none');
+  const { entries, feeds, ids, preferences, total, parts, planned } = plan;
+  const { names } = preferences;
   const budgets = { instance: settings.monthlyTokens, user: settings.userMonthlyTokens };
   if (
     (await remaining(budgets, { instance: storage, user: userStorage }, options.now())) <
     tokensIn(planned)
   )
-    return { overview: null, outcome: 'over budget' };
+    return nothing('over budget');
 
   // Counts are read and written back, so parts answering together count one after another.
   let counting = Promise.resolve();
@@ -231,9 +320,9 @@ export async function compose(options: {
   };
 
   const ask = async (
-    system: string,
+    system: readonly [string, string],
     prompt: string,
-    format: typeof OVERVIEW_FORMAT | typeof PART_FORMAT,
+    format: OutputFormat,
     by: number,
   ): Promise<Asked> => {
     let response: Anthropic.Beta.BetaMessage;
@@ -248,7 +337,11 @@ export async function compose(options: {
           betas: [FALLBACK_BETA],
           fallbacks: 'default',
           output_config: { effort: settings.effort, format },
-          system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
+          // The fixed prompt first, cached for every reader's digests; then the reader's own.
+          system: [
+            { type: 'text', text: system[0], cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: system[1] },
+          ],
           messages: [{ role: 'user', content: prompt }],
         },
         {
@@ -275,60 +368,68 @@ export async function compose(options: {
 
   const language = input.language;
   const frequency = input.frequency;
+  const read = (text: string) => readSections(text, { names, length: userSettings.length, ids });
   if (!parts) {
     const asked = await ask(
-      OVERVIEW_SYSTEM,
+      [OVERVIEW_SYSTEM, preferences.overview],
       overviewPrompt({ language, frequency, total, feeds }),
-      OVERVIEW_FORMAT,
+      sectionsFormat(names),
       options.deadline,
     );
-    if (!asked.ok) return { overview: null, outcome: asked.outcome };
-    const overview = readOverview(asked.text);
-    return overview ? { overview, outcome: 'written' } : { overview: null, outcome: 'invalid' };
+    if (!asked.ok) return nothing(asked.outcome);
+    const overview = read(asked.text);
+    return overview
+      ? { ...additionsOf(overview, userSettings), outcome: 'written' }
+      : nothing('invalid');
   }
 
   const partsBy = Date.now() + Math.floor((options.deadline - Date.now()) * PARTS_SHARE);
   const found = await Promise.all(
     parts.map(async (part): Promise<PartThemes | DigestOutcome> => {
       const asked = await ask(
-        PART_SYSTEM,
+        [PART_SYSTEM, preferences.parts],
         partPrompt({ language, feeds: part }),
-        PART_FORMAT,
+        partFormat(names),
         partsBy,
       );
       if (!asked.ok) return asked.outcome;
-      return readPart(asked.text) ?? 'invalid';
+      return readPart(asked.text, { names, ids }) ?? 'invalid';
     }),
   );
   // A part that failed or ran out of time leaves the overview to the parts that answered.
-  const read = parts.filter((_, index) => typeof found[index] !== 'string');
-  if (read.length === 0) return { overview: null, outcome: found[0] as DigestOutcome };
+  const answered = parts.filter((_, index) => typeof found[index] !== 'string');
+  if (answered.length === 0) return nothing(found[0] as DigestOutcome);
   const asked = await ask(
-    MERGE_SYSTEM,
+    [MERGE_SYSTEM, preferences.overview],
     mergePrompt({
       language,
       frequency,
       given: entries.length,
-      read: read.length < parts.length ? articleCount(read.flat()) : entries.length,
+      read: answered.length < parts.length ? articleCount(answered.flat()) : entries.length,
       total,
       parts: found.filter((part) => typeof part !== 'string'),
     }),
-    OVERVIEW_FORMAT,
+    sectionsFormat(names),
     options.deadline,
   );
-  if (!asked.ok) return { overview: null, outcome: asked.outcome };
-  const overview = readOverview(asked.text);
-  if (!overview) return { overview: null, outcome: 'invalid' };
-  if (read.length === parts.length) return { overview, outcome: 'written' };
+  if (!asked.ok) return nothing(asked.outcome);
+  const overview = read(asked.text);
+  if (!overview) return nothing('invalid');
+  const additions = additionsOf(overview, userSettings);
+  if (answered.length === parts.length) return { ...additions, outcome: 'written' };
   const missed = found.filter((part) => typeof part === 'string');
   const note = missingNote({
-    read: articleCount(read.flat()),
+    read: articleCount(answered.flat()),
     given: entries.length,
     parts: parts.length,
     timedOut: missed.filter((outcome) => outcome === 'timed out').length,
     failed: missed.filter((outcome) => outcome !== 'timed out').length,
   });
-  return { overview: withNote(overview, note), outcome: 'partial' };
+  return {
+    overview: additions.overview ? withNote(additions.overview, note) : note,
+    sections: additions.sections,
+    outcome: 'partial',
+  };
 }
 
 /** What an overview written from only some parts says of the rest. */
